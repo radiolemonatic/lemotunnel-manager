@@ -40,6 +40,19 @@ check_root() {
     fi
 }
 
+validate_name() {
+    local name=$1
+    if [[ -z "$name" ]]; then
+        echo -e "${RED}❌ Name cannot be empty!${NC}"
+        return 1
+    fi
+    if [[ ! "$name" =~ ^[a-zA-Z0-9_-]+$ ]]; then
+        echo -e "${RED}❌ Invalid Name! Only English letters, numbers, and underscores are allowed.${NC}"
+        return 1
+    fi
+    return 0
+}
+
 get_current_bin_version() {
     if [ -f "$BIN_PATH" ]; then
         local ver=$($BIN_PATH --version 2>/dev/null | awk '{print $2}')
@@ -123,15 +136,10 @@ install_wstunnel_binary() {
 }
 
 # --- CRON MANAGEMENT ---
-
 update_cron_job() {
     local name=$1
-    local schedule=$2 # e.g. "0 * * * *" for hourly
-    
-    # Remove existing job for this tunnel
+    local schedule=$2
     crontab -l 2>/dev/null | grep -v "lemo-$name" | crontab -
-    
-    # Add new job
     (crontab -l 2>/dev/null; echo "$schedule systemctl restart lemo-$name #lemo-$name-restart") | crontab -
 }
 
@@ -179,57 +187,40 @@ manage_cron_menu() {
 }
 
 # --- MONITORING LOGIC ---
-
 run_monitor() {
     local name=$1
     local svc_file="${SERVICE_PATH}/lemo-${name}.service"
-    clear
-    print_banner
-    draw_line
+    clear; print_banner; draw_line
     echo -e "${BOLD}${MAGENTA}🔍 REAL-TIME MONITORING: ${WHITE}$name${NC}"
     draw_line
-    
     (
         set +m
         local stop_monitor=false
-        
-        cleanup_monitor() {
-            stop_monitor=true
-            pkill -P $$ 2>/dev/null
-            echo -e "\n${YELLOW}Monitoring stopped.${NC}"
-            sleep 1
-        }
-        
+        cleanup_monitor() { stop_monitor=true; pkill -P $$ 2>/dev/null; echo -e "\n${YELLOW}Monitoring stopped.${NC}"; sleep 1; }
         trap cleanup_monitor SIGINT
         
         if grep -q "server" "$svc_file"; then
-            local port=$(grep -oP '127.0.0.1:\K[0-9]+' "$svc_file" | head -1)
+            local port=$(grep -oE '127.0.0.1:[0-9]+' "$svc_file" | head -1 | cut -d':' -f2)
             echo -e "${CYAN}📡 Role: SERVER | Listening on Port: $port${NC}"
             echo -e "${YELLOW}Press [q] or [Ctrl+C] to return to menu${NC}"
             draw_line
-            
             while [ "$stop_monitor" = false ]; do
                 { timeout 2 nc -l -p "$port" 2>/dev/null | grep "lemotunnel"; } & disown
-                { timeout 2 nc -u -l -p "$port" 2>/dev/null | grep "lemotunnel"; } & disown
-                
                 read -t 2 -n 1 key
                 [[ "$key" == "q" ]] && { cleanup_monitor; break; }
             done
         else
-            local port=$(grep -oP '0.0.0.0:\K[0-9]+' "$svc_file" | head -1)
+            local port=$(grep -oE '0.0.0.0:[0-9]+' "$svc_file" | head -1 | cut -d':' -f2)
             echo -e "${CYAN}📡 Role: CLIENT (IRAN) | Forwarding to Local Port: $port${NC}"
-            echo -e "${YELLOW}Press [q] or [Ctrl+C] to return to menu${NC}"
             draw_line
-            
             while [ "$stop_monitor" = false ]; do
                 if grep -q "tcp://" "$svc_file"; then
                     echo "lemotunnel working" | nc -w 1 127.0.0.1 "$port" 2>/dev/null
-                    echo -e "${GREEN}[$(date +%T)]${NC} Heartbeat Sent"
+                    echo -e "${GREEN}[$(date +%T)]${NC} Heartbeat Sent (TCP)"
                 elif grep -q "udp://" "$svc_file"; then
                     echo "lemotunnel working" | nc -u -w 1 127.0.0.1 "$port" 2>/dev/null
-                    echo -e "${BLUE}[$(date +%T)]${NC} Heartbeat Sent"
+                    echo -e "${BLUE}[$(date +%T)]${NC} Heartbeat Sent (UDP)"
                 fi
-                
                 read -t 3 -n 1 key
                 [[ "$key" == "q" ]] && { cleanup_monitor; break; }
             done
@@ -238,60 +229,133 @@ run_monitor() {
 }
 
 # --- TUNNEL MANAGEMENT ---
-
 list_tunnels() {
     local tunnels=$(ls ${SERVICE_PATH}/lemo-*.service 2>/dev/null)
     [[ -z "$tunnels" ]] && { echo -e "${YELLOW}⚠️  No Tunnels found.${NC}"; return 1; }
-    echo -e "${BOLD}${CYAN}╔══════════════════════════════════════════════════════════╗${NC}"
-    echo -e "${BOLD}${CYAN}║ ID   | Name         | Type    | Status   | Details       ║${NC}"
-    echo -e "${BOLD}${CYAN}╠══════════════════════════════════════════════════════════╣${NC}"
+    
+    echo -e "${BOLD}${CYAN}╔══════╤══════════════╤══════════╤══════════╤═══════════════╗${NC}"
+    echo -e "${BOLD}${CYAN}║ ID   │ Name         │ Type     │ Status   │ Details       ║${NC}"
+    echo -e "${BOLD}${CYAN}╟──────┼──────────────┼──────────┼──────────┼───────────────╢${NC}"
+    
     local count=1
     for t in $tunnels; do
         local name=$(basename "$t" .service | sed 's/lemo-//')
-        local status_icon="🔴"
-        (systemctl is-active --quiet "lemo-$name" || pgrep -f "lemo-$name" > /dev/null) && status_icon="🟢"
+        local is_active=false
+        (systemctl is-active --quiet "lemo-$name" || pgrep -f "lemo-$name" > /dev/null) && is_active=true
+        
         local type="Unknown"
-        grep -q "server" "$t" && type="Outside " || type="Iran    "
-        printf "${BOLD}${CYAN}║${NC} %-4s | %-12s | %-7s |    %-5s | %-13s ${BOLD}${CYAN}║${NC}\n" "$count" "$name" "$type" "$status_icon" "Select to see"
+        grep -q "server" "$t" && type="Outside" || type="Iran"
+        
+        # We use standard ASCII characters for status to ensure perfect alignment
+        local status_text=" Off    "
+        local status_color="$RED"
+        if [ "$is_active" = true ]; then
+            status_text=" Active "
+            status_color="$GREEN"
+        fi
+
+        # Format everything to fixed widths
+        printf "${BOLD}${CYAN}║${NC} %-4s │ %-12s │ %-8s │ ${status_color}%-8s${NC} │ %-13s ${BOLD}${CYAN}║${NC}\n" \
+            "$count" "$name" "$type" "$status_text" "Select to see"
+        
         eval "tunnel_$count=\"$name\""
         count=$((count + 1))
     done
-    echo -e "${BOLD}${CYAN}╚══════════════════════════════════════════════════════════╝${NC}"
+    echo -e "${BOLD}${CYAN}╚══════╧══════════════╧══════════╧══════════╧═══════════════╝${NC}"
     return 0
 }
 
+get_detailed_status() {
+    local name=$1
+    local svc_file="${SERVICE_PATH}/lemo-${name}.service"
+    local status_line=$(systemctl status "lemo-$name" | grep "Active:" | xargs)
+    
+    # Extract Forwarding Info
+    local forward_info=""
+    if grep -q "server" "$svc_file"; then
+        # Fixed port extraction for server mode
+        local target=$(grep "restrict-to" "$svc_file" | sed 's/.*127.0.0.1://' | awk '{print $1}')
+        forward_info="${CYAN}Restricted to Local Port: ${WHITE}${target:-Unknown}${NC}"
+    else
+        # Extract multiple mappings using sed for better reliability
+        local tcp_map=$(grep "tcp://" "$svc_file" | grep -oE 'tcp://[^ ]+')
+        local udp_map=$(grep "udp://" "$svc_file" | grep -oE 'udp://[^ ]+')
+        
+        if [[ ! -z "$tcp_map" ]]; then
+            local formatted_tcp=$(echo "$tcp_map" | sed 's|tcp://0.0.0.0:\([0-9]*\):127.0.0.1:\([0-9]*\)|\1 ➔ \2|')
+            forward_info+="${BLUE}[TCP] ${WHITE}${formatted_tcp}${NC} "
+        fi
+        if [[ ! -z "$udp_map" ]]; then
+            local formatted_udp=$(echo "$udp_map" | sed 's|udp://0.0.0.0:\([0-9]*\):127.0.0.1:\([0-9]*\)|\1 ➔ \2|')
+            forward_info+="${MAGENTA}[UDP] ${WHITE}${formatted_udp}${NC}"
+        fi
+        [[ -z "$forward_info" ]] && forward_info="${RED}No Port Map Found${NC}"
+    fi
+
+    if systemctl is-active --quiet "lemo-$name"; then
+        echo -e "${BOLD}Status: ${GREEN}● ACTIVE${NC} (${status_line#Active: })"
+    else
+        echo -e "${BOLD}Status: ${RED}○ INACTIVE / ERROR${NC}"
+    fi
+    echo -e "${BOLD}Forwarding: ${NC}$forward_info"
+}
+
 setup_new_tunnel() {
-    print_header
-    read -p "Tunnel Name: " TNAME
-    [[ -f "${SERVICE_PATH}/lemo-${TNAME}.service" ]] && { echo -e "${RED}❌ Exists!${NC}"; sleep 2; return; }
-    echo -e "1) Iran (Client)\n2) Outside (Server)"
-    read -p "Type: " TTYPE
+    local TNAME=""
+    while true; do
+        print_header
+        echo -ne "${BOLD}${YELLOW}Tunnel Name (English only): ${NC}"
+        read TNAME
+        if validate_name "$TNAME"; then
+            if [[ -f "${SERVICE_PATH}/lemo-${TNAME}.service" ]]; then
+                echo -e "${RED}❌ Tunnel with this name already exists!${NC}"
+                sleep 2
+            else
+                break
+            fi
+        else
+            sleep 2
+        fi
+    done
+    
+    echo -e "1) ${BOLD}${CYAN}Iran (Client)${NC}\n2) ${BOLD}${MAGENTA}Outside (Server)${NC}"
+    echo -ne "${BOLD}${YELLOW}Type Choice: ${NC}"; read TTYPE
+    
+    draw_line
+    echo -ne "${BOLD}${YELLOW}Secret Key (SAME on both): ${NC}"; read SKEY
+    draw_line
+
     if [ "$TTYPE" == "1" ]; then
-        read -p "Remote IP: " RIP; read -p "WS Port: " RWPORT; read -p "Local Port: " LPORT; read -p "Dest Port: " RPORT
-        echo -e "1) TCP\n2) UDP\n3) Both"
-        read -p "Prot: " PROT
+        echo -ne "${BOLD}${WHITE}Remote IP: ${NC}"; read RIP
+        echo -ne "${BOLD}${WHITE}WS Port: ${NC}"; read RWPORT
+        echo -ne "${BOLD}${WHITE}Local Port (Iran): ${NC}"; read LPORT
+        echo -ne "${BOLD}${WHITE}Destination Port: ${NC}"; read RPORT
+        echo -e "1) ${BOLD}TCP${NC}\n2) ${BOLD}UDP${NC}\n3) ${BOLD}Both${NC}"
+        echo -ne "${BOLD}${YELLOW}Protocol: ${NC}"; read PROT
         local CMD=""
         [[ "$PROT" == "1" || "$PROT" == "3" ]] && CMD+="--local-to-remote tcp://0.0.0.0:${LPORT}:127.0.0.1:${RPORT} "
         [[ "$PROT" == "2" || "$PROT" == "3" ]] && CMD+="--local-to-remote udp://0.0.0.0:${LPORT}:127.0.0.1:${RPORT} "
+        
         cat <<EOF > "${SERVICE_PATH}/lemo-${TNAME}.service"
 [Unit]
 Description=LemoTunnel: ${TNAME}
 After=network.target
 [Service]
-ExecStart=${BIN_PATH} client $CMD ws://${RIP}:${RWPORT}
+ExecStart=${BIN_PATH} client --http-upgrade-path-prefix "${SKEY}" $CMD ws://${RIP}:${RWPORT}
 Restart=always
 RestartSec=3
 [Install]
 WantedBy=multi-user.target
 EOF
     else
-        read -p "WS Port: " RWPORT; read -p "Forward Port (e.g. 22): " FPORT
+        echo -ne "${BOLD}${WHITE}WS Port (Server): ${NC}"; read RWPORT
+        echo -ne "${BOLD}${WHITE}Forward Port (e.g. 22): ${NC}"; read FPORT
         cat <<EOF > "${SERVICE_PATH}/lemo-${TNAME}.service"
 [Unit]
 Description=LemoTunnel: ${TNAME}
 After=network.target
 [Service]
-ExecStart=${BIN_PATH} server --restrict-to 127.0.0.1:${FPORT} ws://0.0.0.0:${RWPORT}
+ExecStart=${BIN_PATH} server --restrict-http-upgrade-path-prefix "${SKEY}" --restrict-to 127.0.0.1:${FPORT} ws://0.0.0.0:${RWPORT}
 Restart=always
 RestartSec=3
 [Install]
@@ -299,32 +363,30 @@ WantedBy=multi-user.target
 EOF
     fi
     systemctl daemon-reload && systemctl enable "lemo-${TNAME}" && systemctl start "lemo-${TNAME}"
-    
-    # Set default 1h restart cron
     update_cron_job "$TNAME" "0 * * * *"
-    
     echo -e "${GREEN}✅ Done! Hourly restart scheduled.${NC}"; sleep 2
 }
 
 manage_tunnels_menu() {
     while true; do
         clear; print_banner; draw_line; list_tunnels || { read -p "Press Enter..."; break; }
-        draw_line; read -p "Enter ID (or 'b'): " T_ID
+        draw_line; echo -ne "${BOLD}${YELLOW}Enter ID (or 'b' to back): ${NC}"; read T_ID
         [[ "$T_ID" == "b" ]] && break
         local T_NAME=$(eval echo \$tunnel_$T_ID)
         [[ -z "$T_NAME" ]] && continue
         while true; do
             clear; print_banner; draw_line; echo -e "${BOLD}${YELLOW}🛠️  Tunnel: $T_NAME${NC}"
+            get_detailed_status "$T_NAME"
             get_cron_info "$T_NAME"
             draw_line
             echo -e "1) ${GREEN}▶️ Start${NC}\n2) ${YELLOW}🔄 Restart${NC}\n3) ${RED}⏹️ Stop${NC}\n4) ${MAGENTA}👁️  Monitor (Live)${NC}\n5) ${BLUE}📝 Logs${NC}\n6) ${CYAN}⏰ Scheduled Restart${NC}\n7) ${RED}🗑️ Delete${NC}\n8) 🔙 Back"
-            draw_line; read -p "Action: " T_ACT
+            draw_line; echo -ne "${BOLD}${YELLOW}Action: ${NC}"; read T_ACT
             case $T_ACT in
                 1) systemctl start "lemo-$T_NAME" ;;
                 2) systemctl restart "lemo-$T_NAME" ;;
                 3) systemctl stop "lemo-$T_NAME" ;;
                 4) run_monitor "$T_NAME" ;;
-                5) journalctl -u "lemo-$T_NAME" -n 50 --no-pager; read -p "Enter..." ;;
+                5) journalctl -u "lemo-$T_NAME" -n 50 --no-pager; read -p "Press Enter..." ;;
                 6) manage_cron_menu "$T_NAME" ;;
                 7) systemctl stop "lemo-$T_NAME" && systemctl disable "lemo-$T_NAME"
                    rm -f "${SERVICE_PATH}/lemo-${T_NAME}.service" && systemctl daemon-reload
@@ -343,13 +405,13 @@ check_root
 while true; do
     print_header
     echo -e "0) 📥 Install wstunnel\n1) ⚙️  Requirements $(check_requirements)\n2) 🆕 New Tunnel\n3) 📦 Manage/Monitor\n4) 🗑️  Uninstall\n5) 🚪 Exit"
-    draw_line; read -p "Option: " CHOICE
+    draw_line; echo -ne "${BOLD}${YELLOW}Option: ${NC}"; read CHOICE
     case $CHOICE in
         0) install_wstunnel_binary ;;
         1) install_requirements ;;
         2) setup_new_tunnel ;;
         3) manage_tunnels_menu ;;
-        4) systemctl stop lemo-*; rm -f ${SERVICE_PATH}/lemo-*.service; rm -f "$BIN_PATH"; systemctl daemon-reload; crontab -l | grep -v "lemo-" | crontab -; echo "Removed."; sleep 2 ;;
-        5) break ;;
+        4) systemctl stop lemo-*; rm -f ${SERVICE_PATH}/lemo-*.service; rm -f "$BIN_PATH"; systemctl daemon-reload; crontab -l | grep -v "lemo-" | crontab -; echo "Removed successfully."; sleep 2 ;;
+        5) exit 0 ;;
     esac
 done
