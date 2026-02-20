@@ -45,6 +45,7 @@ LemoTunnel Manager یک ابزار تعاملی (Interactive CLI) برای نص�
 * gzip
 * unzip
 * netcat-openbsd
+* psmisc
 
 ---
 
@@ -130,6 +131,7 @@ sudo ./lemotunnel.sh
 * WebSocket Port
 * Local Bind Port
 * Destination Port روی سرور خارج
+* Protocol (TCP - UDP - Both)
 
 سپس سرویس زیر ساخته می‌شود:
 
