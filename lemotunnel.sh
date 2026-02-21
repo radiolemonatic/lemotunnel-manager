@@ -228,6 +228,45 @@ run_monitor() {
     )
 }
 
+run_reverse_monitor() {
+    local name=$1
+    local svc_file="${SERVICE_PATH}/lemo-${name}.service"
+    clear; print_banner; draw_line
+    echo -e "${BOLD}${MAGENTA}🔍 REVERSE MONITORING (Server → Iran): ${WHITE}$name${NC}"
+    draw_line
+    
+    if grep -q "server" "$svc_file"; then
+        echo -e "${RED}❌ This is a SERVER tunnel. Reverse monitoring is for CLIENT tunnels only.${NC}"
+        sleep 2
+        return
+    fi
+    
+    local remote_ip=$(grep -oE 'ws://[^:]+' "$svc_file" | sed 's|ws://||')
+    local remote_port=$(grep -oE 'ws://[^:]+:[0-9]+' "$svc_file" | grep -oE '[0-9]+$')
+    local dest_port=$(grep -oE '127.0.0.1:[0-9]+' "$svc_file" | head -1 | cut -d':' -f2)
+    
+    echo -e "${CYAN}📡 Testing connection from SERVER ($remote_ip:$remote_port) to IRAN (port $dest_port)${NC}"
+    echo -e "${YELLOW}Press [q] or [Ctrl+C] to return to menu${NC}"
+    draw_line
+    
+    (
+        set +m
+        local stop_monitor=false
+        cleanup_monitor() { stop_monitor=true; pkill -P $$ 2>/dev/null; echo -e "\n${YELLOW}Monitoring stopped.${NC}"; sleep 1; }
+        trap cleanup_monitor SIGINT
+        
+        while [ "$stop_monitor" = false ]; do
+            if nc -z -w 2 127.0.0.1 "$dest_port" 2>/dev/null; then
+                echo -e "${GREEN}[$(date +%T)]${NC} Port $dest_port is reachable ✅"
+            else
+                echo -e "${RED}[$(date +%T)]${NC} Port $dest_port is NOT reachable ❌"
+            fi
+            read -t 3 -n 1 key
+            [[ "$key" == "q" ]] && { cleanup_monitor; break; }
+        done
+    )
+}
+
 # --- TUNNEL MANAGEMENT ---
 list_tunnels() {
     local tunnels=$(ls ${SERVICE_PATH}/lemo-*.service 2>/dev/null)
@@ -270,6 +309,14 @@ get_detailed_status() {
     local svc_file="${SERVICE_PATH}/lemo-${name}.service"
     local status_line=$(systemctl status "lemo-$name" | grep "Active:" | xargs)
     
+    # Extract WS Port
+    local ws_port=""
+    if grep -q "server" "$svc_file"; then
+        ws_port=$(grep -oE 'ws://0.0.0.0:[0-9]+' "$svc_file" | grep -oE '[0-9]+$')
+    else
+        ws_port=$(grep -oE 'ws://[^:]+:[0-9]+' "$svc_file" | grep -oE '[0-9]+$')
+    fi
+    
     # Extract Forwarding Info
     local forward_info=""
     if grep -q "server" "$svc_file"; then
@@ -297,6 +344,7 @@ get_detailed_status() {
     else
         echo -e "${BOLD}Status: ${RED}○ INACTIVE / ERROR${NC}"
     fi
+    echo -e "${BOLD}WS Port: ${YELLOW}${ws_port:-Unknown}${NC}"
     echo -e "${BOLD}Forwarding: ${NC}$forward_info"
 }
 
@@ -367,6 +415,65 @@ EOF
     echo -e "${GREEN}✅ Done! Hourly restart scheduled.${NC}"; sleep 2
 }
 
+rename_tunnel() {
+    local old_name=$1
+    local new_name=""
+    
+    while true; do
+        echo -ne "${BOLD}${YELLOW}New Tunnel Name: ${NC}"
+        read new_name
+        if validate_name "$new_name"; then
+            if [[ -f "${SERVICE_PATH}/lemo-${new_name}.service" ]]; then
+                echo -e "${RED}❌ A tunnel with this name already exists!${NC}"
+                sleep 2
+            else
+                break
+            fi
+        else
+            sleep 2
+        fi
+    done
+    
+    systemctl stop "lemo-$old_name"
+    systemctl disable "lemo-$old_name"
+    
+    mv "${SERVICE_PATH}/lemo-${old_name}.service" "${SERVICE_PATH}/lemo-${new_name}.service"
+    sed -i "s/Description=LemoTunnel: ${old_name}/Description=LemoTunnel: ${new_name}/" "${SERVICE_PATH}/lemo-${new_name}.service"
+    
+    local old_cron=$(crontab -l 2>/dev/null | grep "lemo-$old_name")
+    if [ ! -z "$old_cron" ]; then
+        local schedule=$(echo "$old_cron" | cut -d ' ' -f 1-5)
+        remove_cron_job "$old_name"
+        update_cron_job "$new_name" "$schedule"
+    fi
+    
+    systemctl daemon-reload
+    systemctl enable "lemo-${new_name}"
+    systemctl start "lemo-${new_name}"
+    
+    echo -e "${GREEN}✅ Tunnel renamed from '$old_name' to '$new_name'${NC}"
+    sleep 2
+}
+
+edit_tunnel_config() {
+    local name=$1
+    local svc_file="${SERVICE_PATH}/lemo-${name}.service"
+    
+    systemctl stop "lemo-$name"
+    nano "$svc_file"
+    
+    echo -ne "${BOLD}${YELLOW}Restart tunnel now? (y/n): ${NC}"
+    read restart_choice
+    if [[ "$restart_choice" == "y" || "$restart_choice" == "Y" ]]; then
+        systemctl daemon-reload
+        systemctl start "lemo-$name"
+        echo -e "${GREEN}✅ Tunnel restarted${NC}"
+    else
+        echo -e "${YELLOW}⚠️  Remember to restart manually later${NC}"
+    fi
+    sleep 2
+}
+
 manage_tunnels_menu() {
     while true; do
         clear; print_banner; draw_line; list_tunnels || { read -p "Press Enter..."; break; }
@@ -379,7 +486,7 @@ manage_tunnels_menu() {
             get_detailed_status "$T_NAME"
             get_cron_info "$T_NAME"
             draw_line
-            echo -e "1) ${GREEN}▶️ Start${NC}\n2) ${YELLOW}🔄 Restart${NC}\n3) ${RED}⏹️ Stop${NC}\n4) ${MAGENTA}👁️  Monitor (Live)${NC}\n5) ${BLUE}📝 Logs${NC}\n6) ${CYAN}⏰ Scheduled Restart${NC}\n7) ${RED}🗑️ Delete${NC}\n8) 🔙 Back"
+            echo -e "1) ${GREEN}▶️ Start${NC}\n2) ${YELLOW}🔄 Restart${NC}\n3) ${RED}⏹️ Stop${NC}\n4) ${MAGENTA}👁️  Monitor (Live)${NC}\n5) ${BLUE}📝 Logs${NC}\n6) ${CYAN}⏰ Scheduled Restart${NC}\n7) ${WHITE}✏️  Rename Tunnel${NC}\n8) ${WHITE}📝 Edit Config (nano)${NC}\n9) ${MAGENTA}🔄 Reverse Monitor${NC}\n10) ${RED}🗑️ Delete${NC}\n11) 🔙 Back"
             draw_line; echo -ne "${BOLD}${YELLOW}Action: ${NC}"; read T_ACT
             case $T_ACT in
                 1) systemctl start "lemo-$T_NAME" ;;
@@ -388,11 +495,14 @@ manage_tunnels_menu() {
                 4) run_monitor "$T_NAME" ;;
                 5) journalctl -u "lemo-$T_NAME" -n 50 --no-pager; read -p "Press Enter..." ;;
                 6) manage_cron_menu "$T_NAME" ;;
-                7) systemctl stop "lemo-$T_NAME" && systemctl disable "lemo-$T_NAME"
+                7) rename_tunnel "$T_NAME"; break ;;
+                8) edit_tunnel_config "$T_NAME" ;;
+                9) run_reverse_monitor "$T_NAME" ;;
+                10) systemctl stop "lemo-$T_NAME" && systemctl disable "lemo-$T_NAME"
                    rm -f "${SERVICE_PATH}/lemo-${T_NAME}.service" && systemctl daemon-reload
                    remove_cron_job "$T_NAME"
                    echo -e "${GREEN}Deleted.${NC}"; sleep 1; break 2 ;;
-                8) break ;;
+                11) break ;;
             esac
         done
     done
@@ -412,6 +522,6 @@ while true; do
         2) setup_new_tunnel ;;
         3) manage_tunnels_menu ;;
         4) systemctl stop lemo-*; rm -f ${SERVICE_PATH}/lemo-*.service; rm -f "$BIN_PATH"; systemctl daemon-reload; crontab -l | grep -v "lemo-" | crontab -; echo "Removed successfully."; sleep 2 ;;
-        5) exit 0 ;;
+        5) clear; echo -e "${GREEN}${BOLD}👋 Goodbye! Thanks for using LemoTunnel${NC}"; break ;;
     esac
 done
