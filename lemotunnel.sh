@@ -309,12 +309,29 @@ get_detailed_status() {
     local svc_file="${SERVICE_PATH}/lemo-${name}.service"
     local status_line=$(systemctl status "lemo-$name" | grep "Active:" | xargs)
     
+    # Extract Secret Key
+    local secret=$(grep -oE 'path-prefix "[^"]+' "$svc_file" | sed 's/path-prefix "//')
+    
     # Extract WS Port
     local ws_port=""
     if grep -q "server" "$svc_file"; then
         ws_port=$(grep -oE 'ws://0.0.0.0:[0-9]+' "$svc_file" | grep -oE '[0-9]+$')
     else
         ws_port=$(grep -oE 'ws://[^:]+:[0-9]+' "$svc_file" | grep -oE '[0-9]+$')
+    fi
+    
+    # Extract Protocol
+    local protocol=""
+    local has_tcp=$(grep -q "tcp://" "$svc_file" && echo "yes" || echo "no")
+    local has_udp=$(grep -q "udp://" "$svc_file" && echo "yes" || echo "no")
+    if [[ "$has_tcp" == "yes" && "$has_udp" == "yes" ]]; then
+        protocol="${BLUE}TCP${NC} + ${MAGENTA}UDP${NC}"
+    elif [[ "$has_tcp" == "yes" ]]; then
+        protocol="${BLUE}TCP${NC}"
+    elif [[ "$has_udp" == "yes" ]]; then
+        protocol="${MAGENTA}UDP${NC}"
+    else
+        protocol="${YELLOW}N/A${NC}"
     fi
     
     # Extract Forwarding Info
@@ -344,7 +361,9 @@ get_detailed_status() {
     else
         echo -e "${BOLD}Status: ${RED}○ INACTIVE / ERROR${NC}"
     fi
+    echo -e "${BOLD}Secret Key: ${CYAN}${secret:-Unknown}${NC}"
     echo -e "${BOLD}WS Port: ${YELLOW}${ws_port:-Unknown}${NC}"
+    echo -e "${BOLD}Protocol: ${NC}$protocol"
     echo -e "${BOLD}Forwarding: ${NC}$forward_info"
 }
 
@@ -412,7 +431,35 @@ EOF
     fi
     systemctl daemon-reload && systemctl enable "lemo-${TNAME}" && systemctl start "lemo-${TNAME}"
     update_cron_job "$TNAME" "0 * * * *"
-    echo -e "${GREEN}✅ Done! Hourly restart scheduled.${NC}"; sleep 2
+    echo -e "${GREEN}✅ Tunnel created successfully!${NC}"
+    echo -ne "${YELLOW}Press Enter to manage this tunnel...${NC}"
+    read
+    
+    # Go directly to tunnel management menu
+    while true; do
+        clear; print_banner; draw_line; echo -e "${BOLD}${YELLOW}🛠️  Tunnel: $TNAME${NC}"
+        get_detailed_status "$TNAME"
+        get_cron_info "$TNAME"
+        draw_line
+        echo -e "1) ${GREEN}▶️ Start${NC}\n2) ${YELLOW}🔄 Restart${NC}\n3) ${RED}⏹️ Stop${NC}\n4) ${MAGENTA}👁️  Monitor (Live)${NC}\n5) ${BLUE}📝 Logs${NC}\n6) ${CYAN}⏰ Scheduled Restart${NC}\n7) ${WHITE}✏️  Rename Tunnel${NC}\n8) ${WHITE}📝 Edit Config (nano)${NC}\n9) ${MAGENTA}🔄 Reverse Monitor${NC}\n10) ${RED}🗑️ Delete${NC}\n11) 🔙 Back to Main Menu"
+        draw_line; echo -ne "${BOLD}${YELLOW}Action: ${NC}"; read T_ACT
+        case $T_ACT in
+            1) systemctl start "lemo-$TNAME" ;;
+            2) systemctl restart "lemo-$TNAME" ;;
+            3) systemctl stop "lemo-$TNAME" ;;
+            4) run_monitor "$TNAME" ;;
+            5) journalctl -u "lemo-$TNAME" -n 50 --no-pager; read -p "Press Enter..." ;;
+            6) manage_cron_menu "$TNAME" ;;
+            7) rename_tunnel "$TNAME"; break ;;
+            8) edit_tunnel_config "$TNAME" ;;
+            9) run_reverse_monitor "$TNAME" ;;
+            10) systemctl stop "lemo-$TNAME" && systemctl disable "lemo-$TNAME"
+               rm -f "${SERVICE_PATH}/lemo-${TNAME}.service" && systemctl daemon-reload
+               remove_cron_job "$TNAME"
+               echo -e "${GREEN}Deleted.${NC}"; sleep 1; break ;;
+            11) break ;;
+        esac
+    done
 }
 
 rename_tunnel() {
