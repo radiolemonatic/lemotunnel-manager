@@ -186,6 +186,147 @@ manage_cron_menu() {
     done
 }
 
+# --- PROXY TEST ---
+test_proxy() {
+    local name=$1
+    local svc_file="${SERVICE_PATH}/lemo-${name}.service"
+    
+    clear; print_banner; draw_line
+    echo -e "${BOLD}${CYAN}🧪 PROXY TEST: ${WHITE}$name${NC}"
+    draw_line
+    
+    # Check if it's a client tunnel
+    if grep -q "server" "$svc_file"; then
+        echo -e "${RED}❌ This is a SERVER tunnel. Proxy test is for CLIENT tunnels only.${NC}"
+        sleep 2
+        return
+    fi
+    
+    # Check if it's SOCKS5
+    if ! grep -q "socks5://" "$svc_file"; then
+        echo -e "${RED}❌ This is not a SOCKS5 tunnel. Proxy test only works with SOCKS5.${NC}"
+        sleep 2
+        return
+    fi
+    
+    # Extract SOCKS5 port
+    local socks_port=$(grep -oE 'socks5://0.0.0.0:[0-9]+' "$svc_file" | grep -oE '[0-9]+$')
+    
+    if [ -z "$socks_port" ]; then
+        echo -e "${RED}❌ Could not detect SOCKS5 port.${NC}"
+        sleep 2
+        return
+    fi
+    
+    echo -e "${CYAN}📡 Testing SOCKS5 proxy on port: ${WHITE}$socks_port${NC}"
+    draw_line
+    
+    # Test if port is listening
+    if ! nc -z -w 1 127.0.0.1 "$socks_port" 2>/dev/null; then
+        echo -e "${RED}❌ SOCKS5 port $socks_port is not listening!${NC}"
+        echo -e "${YELLOW}Make sure the tunnel is running.${NC}"
+        sleep 3
+        return
+    fi
+    
+    echo -e "${GREEN}✅ SOCKS5 port is listening${NC}\n"
+    echo -e "${YELLOW}🌐 Fetching IP information...${NC}\n"
+    
+    # Fetch IP info through proxy with timeout
+    local response=$(timeout 10 curl -s -x socks5h://127.0.0.1:$socks_port https://ipinfo.io/json 2>/dev/null)
+    
+    if [ -z "$response" ]; then
+        echo -e "${RED}❌ Failed to connect through proxy!${NC}"
+        echo -e "${YELLOW}Possible reasons:${NC}"
+        echo -e "  • Server tunnel is not running or misconfigured"
+        echo -e "  • Network connectivity issue"
+        echo -e "  • Firewall blocking the connection"
+        sleep 3
+        return
+    fi
+    
+    # Parse JSON response
+    local ip=$(echo "$response" | jq -r '.ip // "N/A"')
+    local city=$(echo "$response" | jq -r '.city // "N/A"')
+    local region=$(echo "$response" | jq -r '.region // "N/A"')
+    local country=$(echo "$response" | jq -r '.country // "N/A"')
+    local org=$(echo "$response" | jq -r '.org // "N/A"')
+    local timezone=$(echo "$response" | jq -r '.timezone // "N/A"')
+    
+    # Country flag emoji mapping
+    local flag=""
+    case $country in
+        US) flag="🇺🇸" ;;
+        GB) flag="🇬🇧" ;;
+        DE) flag="🇩🇪" ;;
+        FR) flag="🇫🇷" ;;
+        NL) flag="🇳🇱" ;;
+        CA) flag="🇨🇦" ;;
+        JP) flag="🇯🇵" ;;
+        SG) flag="🇸🇬" ;;
+        AU) flag="🇦🇺" ;;
+        SE) flag="🇸🇪" ;;
+        FI) flag="🇫🇮" ;;
+        NO) flag="🇳🇴" ;;
+        DK) flag="🇩🇰" ;;
+        CH) flag="🇨🇭" ;;
+        AT) flag="🇦🇹" ;;
+        BE) flag="🇧🇪" ;;
+        IT) flag="🇮🇹" ;;
+        ES) flag="🇪🇸" ;;
+        PL) flag="🇵🇱" ;;
+        CZ) flag="🇨🇿" ;;
+        RU) flag="🇷🇺" ;;
+        TR) flag="🇹🇷" ;;
+        AE) flag="🇦🇪" ;;
+        IN) flag="🇮🇳" ;;
+        CN) flag="🇨🇳" ;;
+        KR) flag="🇰🇷" ;;
+        BR) flag="🇧🇷" ;;
+        MX) flag="🇲🇽" ;;
+        AR) flag="🇦🇷" ;;
+        IR) flag="🇮🇷" ;;
+        *) flag="🌍" ;;
+    esac
+    
+    # Measure ping (latency)
+    echo -e "${YELLOW}📊 Measuring latency...${NC}\n"
+    local start_time=$(date +%s%3N)
+    timeout 5 curl -s -x socks5h://127.0.0.1:$socks_port https://www.google.com > /dev/null 2>&1
+    local end_time=$(date +%s%3N)
+    local ping=$((end_time - start_time))
+    
+    # Display results
+    draw_line
+    echo -e "${BOLD}${GREEN}✅ PROXY CONNECTION SUCCESSFUL${NC}\n"
+    echo -e "${BOLD}${CYAN}📍 Location:${NC}"
+    echo -e "   ${flag} ${BOLD}${WHITE}${country}${NC} - ${city}, ${region}"
+    echo -e ""
+    echo -e "${BOLD}${CYAN}🌐 Network Info:${NC}"
+    echo -e "   IP Address: ${WHITE}${ip}${NC}"
+    echo -e "   ISP/Org: ${WHITE}${org}${NC}"
+    echo -e "   Timezone: ${WHITE}${timezone}${NC}"
+    echo -e ""
+    echo -e "${BOLD}${CYAN}⚡ Performance:${NC}"
+    
+    if [ $ping -lt 100 ]; then
+        echo -e "   Latency: ${GREEN}${ping}ms (Excellent)${NC}"
+    elif [ $ping -lt 200 ]; then
+        echo -e "   Latency: ${YELLOW}${ping}ms (Good)${NC}"
+    elif [ $ping -lt 500 ]; then
+        echo -e "   Latency: ${YELLOW}${ping}ms (Fair)${NC}"
+    else
+        echo -e "   Latency: ${RED}${ping}ms (Slow)${NC}"
+    fi
+    
+    draw_line
+    echo -e "${CYAN}💡 Test command used:${NC}"
+    echo -e "   ${WHITE}curl -x socks5h://127.0.0.1:${socks_port} https://ipinfo.io${NC}"
+    draw_line
+    
+    read -p "Press Enter to continue..."
+}
+
 # --- MONITORING LOGIC ---
 run_monitor() {
     local name=$1
@@ -211,19 +352,39 @@ run_monitor() {
             done
         else
             local port=$(grep -oE '0.0.0.0:[0-9]+' "$svc_file" | head -1 | cut -d':' -f2)
-            echo -e "${CYAN}📡 Role: CLIENT (IRAN) | Forwarding to Local Port: $port${NC}"
-            draw_line
-            while [ "$stop_monitor" = false ]; do
-                if grep -q "tcp://" "$svc_file"; then
-                    echo "lemotunnel working" | nc -w 1 127.0.0.1 "$port" 2>/dev/null
-                    echo -e "${GREEN}[$(date +%T)]${NC} Heartbeat Sent (TCP)"
-                elif grep -q "udp://" "$svc_file"; then
-                    echo "lemotunnel working" | nc -u -w 1 127.0.0.1 "$port" 2>/dev/null
-                    echo -e "${BLUE}[$(date +%T)]${NC} Heartbeat Sent (UDP)"
-                fi
-                read -t 3 -n 1 key
-                [[ "$key" == "q" ]] && { cleanup_monitor; break; }
-            done
+            
+            # Check if it's SOCKS5
+            if grep -q "socks5://" "$svc_file"; then
+                echo -e "${CYAN}📡 Role: CLIENT (IRAN) | SOCKS5 Proxy on Port: $port${NC}"
+                echo -e "${YELLOW}Press [q] or [Ctrl+C] to return to menu${NC}"
+                draw_line
+                echo -e "${GREEN}SOCKS5 proxy is running on 0.0.0.0:$port${NC}"
+                echo -e "${CYAN}You can test it with: curl -x socks5h://127.0.0.1:$port https://google.com${NC}"
+                draw_line
+                while [ "$stop_monitor" = false ]; do
+                    if nc -z -w 1 127.0.0.1 "$port" 2>/dev/null; then
+                        echo -e "${GREEN}[$(date +%T)]${NC} SOCKS5 Port $port is listening ✅"
+                    else
+                        echo -e "${RED}[$(date +%T)]${NC} SOCKS5 Port $port is NOT listening ❌"
+                    fi
+                    read -t 3 -n 1 key
+                    [[ "$key" == "q" ]] && { cleanup_monitor; break; }
+                done
+            else
+                echo -e "${CYAN}📡 Role: CLIENT (IRAN) | Forwarding to Local Port: $port${NC}"
+                draw_line
+                while [ "$stop_monitor" = false ]; do
+                    if grep -q "tcp://" "$svc_file"; then
+                        echo "lemotunnel working" | nc -w 1 127.0.0.1 "$port" 2>/dev/null
+                        echo -e "${GREEN}[$(date +%T)]${NC} Heartbeat Sent (TCP)"
+                    elif grep -q "udp://" "$svc_file"; then
+                        echo "lemotunnel working" | nc -u -w 1 127.0.0.1 "$port" 2>/dev/null
+                        echo -e "${BLUE}[$(date +%T)]${NC} Heartbeat Sent (UDP)"
+                    fi
+                    read -t 3 -n 1 key
+                    [[ "$key" == "q" ]] && { cleanup_monitor; break; }
+                done
+            fi
         fi
     )
 }
@@ -324,7 +485,11 @@ get_detailed_status() {
     local protocol=""
     local has_tcp=$(grep -q "tcp://" "$svc_file" && echo "yes" || echo "no")
     local has_udp=$(grep -q "udp://" "$svc_file" && echo "yes" || echo "no")
-    if [[ "$has_tcp" == "yes" && "$has_udp" == "yes" ]]; then
+    local has_socks5=$(grep -q "socks5://" "$svc_file" && echo "yes" || echo "no")
+    
+    if [[ "$has_socks5" == "yes" ]]; then
+        protocol="${GREEN}SOCKS5${NC}"
+    elif [[ "$has_tcp" == "yes" && "$has_udp" == "yes" ]]; then
         protocol="${BLUE}TCP${NC} + ${MAGENTA}UDP${NC}"
     elif [[ "$has_tcp" == "yes" ]]; then
         protocol="${BLUE}TCP${NC}"
@@ -341,19 +506,31 @@ get_detailed_status() {
         local target=$(grep "restrict-to" "$svc_file" | sed 's/.*127.0.0.1://' | awk '{print $1}')
         forward_info="${CYAN}Restricted to Local Port: ${WHITE}${target:-Unknown}${NC}"
     else
-        # Extract multiple mappings using sed for better reliability
-        local tcp_map=$(grep "tcp://" "$svc_file" | grep -oE 'tcp://[^ ]+')
-        local udp_map=$(grep "udp://" "$svc_file" | grep -oE 'udp://[^ ]+')
-        
-        if [[ ! -z "$tcp_map" ]]; then
-            local formatted_tcp=$(echo "$tcp_map" | sed 's|tcp://0.0.0.0:\([0-9]*\):127.0.0.1:\([0-9]*\)|\1 ➔ \2|')
-            forward_info+="${BLUE}[TCP] ${WHITE}${formatted_tcp}${NC} "
+        # Check for SOCKS5 first
+        local socks5_map=$(grep "socks5://" "$svc_file" | grep -oE 'socks5://[^ ]+')
+        if [[ ! -z "$socks5_map" ]]; then
+            local socks_port=$(echo "$socks5_map" | grep -oE ':[0-9]+' | head -1 | sed 's/://')
+            local has_auth=$(echo "$socks5_map" | grep -q "login=" && echo "yes" || echo "no")
+            if [[ "$has_auth" == "yes" ]]; then
+                forward_info="${GREEN}[SOCKS5] ${WHITE}Port: ${socks_port} (Auth Enabled)${NC}"
+            else
+                forward_info="${GREEN}[SOCKS5] ${WHITE}Port: ${socks_port}${NC}"
+            fi
+        else
+            # Extract multiple mappings using sed for better reliability
+            local tcp_map=$(grep "tcp://" "$svc_file" | grep -oE 'tcp://[^ ]+')
+            local udp_map=$(grep "udp://" "$svc_file" | grep -oE 'udp://[^ ]+')
+            
+            if [[ ! -z "$tcp_map" ]]; then
+                local formatted_tcp=$(echo "$tcp_map" | sed 's|tcp://0.0.0.0:\([0-9]*\):127.0.0.1:\([0-9]*\)|\1 ➔ \2|')
+                forward_info+="${BLUE}[TCP] ${WHITE}${formatted_tcp}${NC} "
+            fi
+            if [[ ! -z "$udp_map" ]]; then
+                local formatted_udp=$(echo "$udp_map" | sed 's|udp://0.0.0.0:\([0-9]*\):127.0.0.1:\([0-9]*\)|\1 ➔ \2|')
+                forward_info+="${MAGENTA}[UDP] ${WHITE}${formatted_udp}${NC}"
+            fi
+            [[ -z "$forward_info" ]] && forward_info="${RED}No Port Map Found${NC}"
         fi
-        if [[ ! -z "$udp_map" ]]; then
-            local formatted_udp=$(echo "$udp_map" | sed 's|udp://0.0.0.0:\([0-9]*\):127.0.0.1:\([0-9]*\)|\1 ➔ \2|')
-            forward_info+="${MAGENTA}[UDP] ${WHITE}${formatted_udp}${NC}"
-        fi
-        [[ -z "$forward_info" ]] && forward_info="${RED}No Port Map Found${NC}"
     fi
 
     if systemctl is-active --quiet "lemo-$name"; then
@@ -395,13 +572,34 @@ setup_new_tunnel() {
     if [ "$TTYPE" == "1" ]; then
         echo -ne "${BOLD}${WHITE}Remote IP: ${NC}"; read RIP
         echo -ne "${BOLD}${WHITE}WS Port: ${NC}"; read RWPORT
-        echo -ne "${BOLD}${WHITE}Local Port (Iran): ${NC}"; read LPORT
-        echo -ne "${BOLD}${WHITE}Destination Port: ${NC}"; read RPORT
-        echo -e "1) ${BOLD}TCP${NC}\n2) ${BOLD}UDP${NC}\n3) ${BOLD}Both${NC}"
-        echo -ne "${BOLD}${YELLOW}Protocol: ${NC}"; read PROT
+        
+        # Ask for tunnel mode
+        echo -e "1) ${BOLD}Port Forward (TCP/UDP)${NC}\n2) ${BOLD}SOCKS5 Proxy${NC}"
+        echo -ne "${BOLD}${YELLOW}Tunnel Mode: ${NC}"; read TUNNEL_MODE
+        
         local CMD=""
-        [[ "$PROT" == "1" || "$PROT" == "3" ]] && CMD+="--local-to-remote tcp://0.0.0.0:${LPORT}:127.0.0.1:${RPORT} "
-        [[ "$PROT" == "2" || "$PROT" == "3" ]] && CMD+="--local-to-remote udp://0.0.0.0:${LPORT}:127.0.0.1:${RPORT} "
+        if [ "$TUNNEL_MODE" == "2" ]; then
+            # SOCKS5 mode
+            echo -ne "${BOLD}${WHITE}SOCKS5 Port (Iran): ${NC}"; read SOCKS_PORT
+            echo -ne "${BOLD}${YELLOW}Enable Authentication? (y/n): ${NC}"; read USE_AUTH
+            
+            if [[ "$USE_AUTH" == "y" || "$USE_AUTH" == "Y" ]]; then
+                echo -ne "${BOLD}${WHITE}Username: ${NC}"; read SOCKS_USER
+                echo -ne "${BOLD}${WHITE}Password: ${NC}"; read -s SOCKS_PASS
+                echo ""
+                CMD="--local-to-remote socks5://0.0.0.0:${SOCKS_PORT}?login=${SOCKS_USER}&password=${SOCKS_PASS} "
+            else
+                CMD="--local-to-remote socks5://0.0.0.0:${SOCKS_PORT} "
+            fi
+        else
+            # Port forward mode
+            echo -ne "${BOLD}${WHITE}Local Port (Iran): ${NC}"; read LPORT
+            echo -ne "${BOLD}${WHITE}Destination Port: ${NC}"; read RPORT
+            echo -e "1) ${BOLD}TCP${NC}\n2) ${BOLD}UDP${NC}\n3) ${BOLD}Both${NC}"
+            echo -ne "${BOLD}${YELLOW}Protocol: ${NC}"; read PROT
+            [[ "$PROT" == "1" || "$PROT" == "3" ]] && CMD+="--local-to-remote tcp://0.0.0.0:${LPORT}:127.0.0.1:${RPORT} "
+            [[ "$PROT" == "2" || "$PROT" == "3" ]] && CMD+="--local-to-remote udp://0.0.0.0:${LPORT}:127.0.0.1:${RPORT} "
+        fi
         
         cat <<EOF > "${SERVICE_PATH}/lemo-${TNAME}.service"
 [Unit]
@@ -416,10 +614,30 @@ WantedBy=multi-user.target
 EOF
     else
         echo -ne "${BOLD}${WHITE}WS Port (Server): ${NC}"; read RWPORT
-        echo -ne "${BOLD}${WHITE}Forward Port (e.g. 22): ${NC}"; read FPORT
-        cat <<EOF > "${SERVICE_PATH}/lemo-${TNAME}.service"
+        
+        # Ask if this server is for SOCKS5 or port forward
+        echo -e "1) ${BOLD}Port Forward (Restrict to specific port)${NC}\n2) ${BOLD}SOCKS5 Server (No restrictions)${NC}"
+        echo -ne "${BOLD}${YELLOW}Server Mode: ${NC}"; read SERVER_MODE
+        
+        if [ "$SERVER_MODE" == "2" ]; then
+            # SOCKS5 server - no restrictions
+            cat <<EOF > "${SERVICE_PATH}/lemo-${TNAME}.service"
 [Unit]
-Description=LemoTunnel: ${TNAME}
+Description=LemoTunnel: ${TNAME} (Server)
+After=network.target
+[Service]
+ExecStart=${BIN_PATH} server --restrict-http-upgrade-path-prefix "${SKEY}" ws://0.0.0.0:${RWPORT}
+Restart=always
+RestartSec=3
+[Install]
+WantedBy=multi-user.target
+EOF
+        else
+            # Port forward - restrict to specific port
+            echo -ne "${BOLD}${WHITE}Forward Port (e.g. 22): ${NC}"; read FPORT
+            cat <<EOF > "${SERVICE_PATH}/lemo-${TNAME}.service"
+[Unit]
+Description=LemoTunnel: ${TNAME} (Server)
 After=network.target
 [Service]
 ExecStart=${BIN_PATH} server --restrict-http-upgrade-path-prefix "${SKEY}" --restrict-to 127.0.0.1:${FPORT} ws://0.0.0.0:${RWPORT}
@@ -428,6 +646,7 @@ RestartSec=3
 [Install]
 WantedBy=multi-user.target
 EOF
+        fi
     fi
     systemctl daemon-reload && systemctl enable "lemo-${TNAME}" && systemctl start "lemo-${TNAME}"
     update_cron_job "$TNAME" "0 * * * *"
@@ -441,7 +660,7 @@ EOF
         get_detailed_status "$TNAME"
         get_cron_info "$TNAME"
         draw_line
-        echo -e "1) ${GREEN}▶️ Start${NC}\n2) ${YELLOW}🔄 Restart${NC}\n3) ${RED}⏹️ Stop${NC}\n4) ${MAGENTA}👁️  Monitor (Live)${NC}\n5) ${BLUE}📝 Logs${NC}\n6) ${CYAN}⏰ Scheduled Restart${NC}\n7) ${WHITE}✏️  Rename Tunnel${NC}\n8) ${WHITE}📝 Edit Config (nano)${NC}\n9) ${MAGENTA}🔄 Reverse Monitor${NC}\n10) ${RED}🗑️ Delete${NC}\n11) 🔙 Back to Main Menu"
+        echo -e "1) ${GREEN}▶️ Start${NC}\n2) ${YELLOW}🔄 Restart${NC}\n3) ${RED}⏹️ Stop${NC}\n4) ${MAGENTA}👁️  Monitor (Live)${NC}\n5) ${BLUE}📝 Logs${NC}\n6) ${CYAN}⏰ Scheduled Restart${NC}\n7) ${CYAN}🧪 Test Proxy (SOCKS5)${NC}\n8) ${WHITE}✏️  Rename Tunnel${NC}\n9) ${WHITE}📝 Edit Config (nano)${NC}\n10) ${MAGENTA}🔄 Reverse Monitor${NC}\n11) ${RED}🗑️ Delete${NC}\n12) 🔙 Back to Main Menu"
         draw_line; echo -ne "${BOLD}${YELLOW}Action: ${NC}"; read T_ACT
         case $T_ACT in
             1) systemctl start "lemo-$TNAME" ;;
@@ -450,14 +669,15 @@ EOF
             4) run_monitor "$TNAME" ;;
             5) journalctl -u "lemo-$TNAME" -n 50 --no-pager; read -p "Press Enter..." ;;
             6) manage_cron_menu "$TNAME" ;;
-            7) rename_tunnel "$TNAME"; break ;;
-            8) edit_tunnel_config "$TNAME" ;;
-            9) run_reverse_monitor "$TNAME" ;;
-            10) systemctl stop "lemo-$TNAME" && systemctl disable "lemo-$TNAME"
+            7) test_proxy "$TNAME" ;;
+            8) rename_tunnel "$TNAME"; break ;;
+            9) edit_tunnel_config "$TNAME" ;;
+            10) run_reverse_monitor "$TNAME" ;;
+            11) systemctl stop "lemo-$TNAME" && systemctl disable "lemo-$TNAME"
                rm -f "${SERVICE_PATH}/lemo-${TNAME}.service" && systemctl daemon-reload
                remove_cron_job "$TNAME"
                echo -e "${GREEN}Deleted.${NC}"; sleep 1; break ;;
-            11) break ;;
+            12) break ;;
         esac
     done
 }
@@ -533,7 +753,7 @@ manage_tunnels_menu() {
             get_detailed_status "$T_NAME"
             get_cron_info "$T_NAME"
             draw_line
-            echo -e "1) ${GREEN}▶️ Start${NC}\n2) ${YELLOW}🔄 Restart${NC}\n3) ${RED}⏹️ Stop${NC}\n4) ${MAGENTA}👁️  Monitor (Live)${NC}\n5) ${BLUE}📝 Logs${NC}\n6) ${CYAN}⏰ Scheduled Restart${NC}\n7) ${WHITE}✏️  Rename Tunnel${NC}\n8) ${WHITE}📝 Edit Config (nano)${NC}\n9) ${MAGENTA}🔄 Reverse Monitor${NC}\n10) ${RED}🗑️ Delete${NC}\n11) 🔙 Back"
+            echo -e "1) ${GREEN}▶️ Start${NC}\n2) ${YELLOW}🔄 Restart${NC}\n3) ${RED}⏹️ Stop${NC}\n4) ${MAGENTA}👁️  Monitor (Live)${NC}\n5) ${BLUE}📝 Logs${NC}\n6) ${CYAN}⏰ Scheduled Restart${NC}\n7) ${CYAN}🧪 Test Proxy (SOCKS5)${NC}\n8) ${WHITE}✏️  Rename Tunnel${NC}\n9) ${WHITE}📝 Edit Config (nano)${NC}\n10) ${MAGENTA}🔄 Reverse Monitor${NC}\n11) ${RED}🗑️ Delete${NC}\n12) 🔙 Back"
             draw_line; echo -ne "${BOLD}${YELLOW}Action: ${NC}"; read T_ACT
             case $T_ACT in
                 1) systemctl start "lemo-$T_NAME" ;;
@@ -542,14 +762,15 @@ manage_tunnels_menu() {
                 4) run_monitor "$T_NAME" ;;
                 5) journalctl -u "lemo-$T_NAME" -n 50 --no-pager; read -p "Press Enter..." ;;
                 6) manage_cron_menu "$T_NAME" ;;
-                7) rename_tunnel "$T_NAME"; break ;;
-                8) edit_tunnel_config "$T_NAME" ;;
-                9) run_reverse_monitor "$T_NAME" ;;
-                10) systemctl stop "lemo-$T_NAME" && systemctl disable "lemo-$T_NAME"
+                7) test_proxy "$T_NAME" ;;
+                8) rename_tunnel "$T_NAME"; break ;;
+                9) edit_tunnel_config "$T_NAME" ;;
+                10) run_reverse_monitor "$T_NAME" ;;
+                11) systemctl stop "lemo-$T_NAME" && systemctl disable "lemo-$T_NAME"
                    rm -f "${SERVICE_PATH}/lemo-${T_NAME}.service" && systemctl daemon-reload
                    remove_cron_job "$T_NAME"
                    echo -e "${GREEN}Deleted.${NC}"; sleep 1; break 2 ;;
-                11) break ;;
+                12) break ;;
             esac
         done
     done
